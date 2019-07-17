@@ -16,8 +16,9 @@ import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
 from homeassistant.components.climate import ( ClimateDevice, PLATFORM_SCHEMA,
-    STATE_AUTO, STATE_HEAT, STATE_IDLE,
-    SUPPORT_TARGET_TEMPERATURE, SUPPORT_OPERATION_MODE )
+    STATE_AUTO, STATE_HEAT, STATE_IDLE, STATE_COOL,
+    SUPPORT_TARGET_TEMPERATURE, SUPPORT_OPERATION_MODE, SUPPORT_AWAY_MODE )
+
 from homeassistant.const import TEMP_CELSIUS, ATTR_TEMPERATURE
 from homeassistant.const import STATE_UNKNOWN, EVENT_HOMEASSISTANT_STOP
 
@@ -25,7 +26,7 @@ from nefit import NefitClient
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORT_FLAGS = (SUPPORT_TARGET_TEMPERATURE | SUPPORT_OPERATION_MODE)
+SUPPORT_FLAGS = (SUPPORT_TARGET_TEMPERATURE | SUPPORT_OPERATION_MODE | SUPPORT_AWAY_MODE)
 
 CONF_NAME = "name"
 CONF_SERIAL = "serial"
@@ -67,8 +68,9 @@ class NefitThermostat(ClimateDevice):
         self._data = {}
         self._attributes = {}
         self._attributes["connection_error_count"] = 0
-        self.override_target_temp = False
-        self.new_target_temp = 0
+        self._override_target_temp = False
+        self._new_target_temp = 0
+        self._away = None
 
         _LOGGER.debug("Constructor for {} called.".format(self._name))
 
@@ -158,7 +160,7 @@ class NefitThermostat(ClimateDevice):
         elif state == 'hot water':
             return STATE_HOTWATER
         elif state == 'off':
-            return STATE_IDLE
+            return STATE_ECO
         else:
             return None
 
@@ -167,9 +169,9 @@ class NefitThermostat(ClimateDevice):
 
         #update happens too fast after setting new target, so value is not changed on server yet.
         #assume for this first update that the set target was succesful
-        if self.override_target_temp:
-            self._target_temperature = self.new_target_temp
-            self.override_target_temp = False
+        if self._override_target_temp:
+            self._target_temperature = self._new_target_temp
+            self._override_target_temp = False
         else:
             self._target_temperature = self._data.get('temp setpoint', None)
 
@@ -186,8 +188,8 @@ class NefitThermostat(ClimateDevice):
 
             self._client.set_temperature(temperature)
 
-            self.override_target_temp = True
-            self.new_target_temp = temperature
+            self._override_target_temp = True
+            self._new_target_temp = temperature
 
         except:
             _LOGGER.error("Error setting target temperature")
@@ -199,6 +201,39 @@ class NefitThermostat(ClimateDevice):
             self._client.put('/heatingCircuits/hc1/usermode', {'value': 'manual'})
         else:
             self._client.put('/heatingCircuits/hc1/usermode', {'value': 'clock'})
+
+    @property
+    def is_away_mode_on(self):
+        """Return true if away mode is on."""
+        endpoint = 'dhwOperationClockMode' if self._data.get("user mode") == 'clock' else 'dhwOperationManualMode'
+        try:
+            r = self._client.get('/dhwCircuits/dhwA/' + endpoint)
+            #_LOGGER.debug("Getting hot water state: " + r.get("value"))
+            return r.get("value") == "off" # if hot water is off, away mode is on
+        except:
+            _LOGGER.error("Error getting away mode state")
+
+        return self._away
+
+    def turn_away_mode_on(self):
+        """Turn away on."""
+        endpoint = 'dhwOperationClockMode' if self._data.get("user mode") == 'clock' else 'dhwOperationManualMode'
+
+        try:
+            self._client.put('/dhwCircuits/dhwA/' + endpoint, {"value": "off"})
+            self._away = True
+        except:
+            _LOGGER.error("Error setting away mode on")
+
+    def turn_away_mode_off(self):
+        """Turn away off."""
+        endpoint = 'dhwOperationClockMode' if self._data.get("user mode") == 'clock' else 'dhwOperationManualMode'
+
+        try:
+            self._client.put('/dhwCircuits/dhwA/' + endpoint, {"value": "on"})
+            self._away = False
+        except:
+            _LOGGER.error("Error setting away mode off")
 
     @property
     def device_state_attributes(self):
